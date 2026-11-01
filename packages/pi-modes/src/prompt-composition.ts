@@ -119,9 +119,39 @@ export function resolveModeSelection(
     }
   }
 
+  // A composed definition whose project half cannot be used degrades to the definition it extends.
+  // Dropping the whole selection here would let an unconfirmed project file take the fleet contract
+  // with it — the failure that makes a composition worse than no composition at all.
+  const approvals = policy.projectApprovals;
+  const substituted = new Set<string>();
+  const degrade = (mode: ResolvedMode | undefined): ResolvedMode | undefined => {
+    if (!mode || !approvals || mode.scope !== "project") return mode;
+    if (isProjectModeApproved(mode, approvals)) return mode;
+    const fallback = mode.fallback;
+    if (!fallback) return mode;
+    substituted.add(mode.key);
+    diagnostics.push({
+      key: mode.key,
+      message: `project text dropped: ${mode.path ? displaySafe(mode.path) : "the project definition"} is not confirmed; continuing with the ${fallback.scope} definition alone`,
+    });
+    return {
+      ...fallback,
+      key: mode.key,
+      schemaVersion: mode.schemaVersion,
+      scope: fallback.scope,
+    } as ResolvedMode;
+  };
+  base = degrade(base);
+  for (let index = 0; index < overlays.length; index += 1) {
+    const next = degrade(overlays[index]);
+    if (next) overlays[index] = next;
+  }
   const components = [...(base ? [base] : []), ...overlays];
   if (policy.fingerprints) {
     for (const key of selectedKeys(normalized)) {
+      // A substituted definition is the shallower one; its fingerprint was never recorded under
+      // this key while the key was project-scoped, so drift cannot be judged for it here.
+      if (substituted.has(key)) continue;
       const expected = policy.fingerprints[key];
       const current = byKey.get(key);
       const actual = current ? modeDefinitionFingerprint(current) : undefined;
@@ -140,7 +170,6 @@ export function resolveModeSelection(
       }
     }
   }
-  const approvals = policy.projectApprovals;
   const unconfirmed = approvals
     ? components.filter((mode) => !isProjectModeApproved(mode, approvals))
     : [];

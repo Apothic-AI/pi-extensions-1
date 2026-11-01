@@ -24,7 +24,12 @@ export { BUILTIN_MODES, MODE_PROMPT_MAX_BYTES };
 export const MODE_SCHEMA_VERSION = 2 as const;
 export const MODE_DEFINITION_MAX_BYTES = 256 * 1024;
 export const MODE_DIRECTORY_MAX_FILES = 1024;
-export type PromptStrategy = "append" | "replace_base" | "replace_final";
+/**
+ * How a definition composes with the host system prompt, plus `replace`, which says how it composes
+ * with a shallower definition of the same key rather than with the host. `replace` is consumed at
+ * resolution and never reaches selection: the resolved mode carries `replace_base` instead.
+ */
+export type PromptStrategy = "append" | "replace_base" | "replace_final" | "replace";
 export type ModeScope = "builtin" | "global" | "project";
 
 export interface ModeDefinition {
@@ -50,6 +55,29 @@ export interface ResolvedMode extends ModeDefinition {
   // The sibling <key>.md its prompt was read from, when it lives there. Not part of the fingerprint:
   // moving an identical prompt into the file is not a change.
   promptPath?: string;
+  // A definition whose text is this definition's prompt followed by a deeper project definition's:
+  // the scopes and files that composed, shallowest first. Not part of the fingerprint.
+  composedFrom?: ComposedContribution[];
+  // What remains of this definition if the project half of a composition cannot be used: the
+  // shallower definition alone, so an unconfirmed project file cannot take the fleet contract with
+  // it. Not part of the fingerprint, and absent on a definition that composes nothing.
+  fallback?: ComposedFallback;
+}
+
+export interface ComposedContribution {
+  scope: ModeScope;
+  path?: string;
+}
+
+/** The shallower definition a composition extends, kept so resolution can degrade to it. */
+export interface ComposedFallback {
+  scope: ModeScope;
+  label: string;
+  promptStrategy: PromptStrategy;
+  systemPrompt: string;
+  requires?: string[];
+  conflictsWith?: string[];
+  path?: string;
 }
 
 export interface ModeDiagnostic {
@@ -170,7 +198,7 @@ export function parseModeDefinition(raw: unknown, promptFromFile?: string): Mode
   }
   const promptStrategy = value.promptStrategy ?? "replace_base";
   if (!isPromptStrategy(promptStrategy)) {
-    throw new Error("promptStrategy must be append, replace_base, or replace_final");
+    throw new Error("promptStrategy must be append, replace, replace_base, or replace_final");
   }
   // A prompt file's own trailing newline is not part of the prompt it holds.
   const measured =
@@ -210,7 +238,12 @@ export function parseModeDefinition(raw: unknown, promptFromFile?: string): Mode
 }
 
 function isPromptStrategy(value: unknown): value is PromptStrategy {
-  return value === "append" || value === "replace_base" || value === "replace_final";
+  return (
+    value === "append" ||
+    value === "replace" ||
+    value === "replace_base" ||
+    value === "replace_final"
+  );
 }
 
 export function modeDefinitionFingerprint(mode: ResolvedMode): DefinitionFingerprint {
@@ -383,22 +416,78 @@ export function loadModes(options: {
       diagnostics.push(...project.diagnostics);
       for (const mode of project.modes) {
         const previous = byKey.get(mode.key);
-        byKey.set(
-          mode.key,
-          previous
-            ? {
-                ...mode,
-                shadows: previous.scope,
-                ...(previous.path ? { shadowedPath: previous.path } : {}),
-              }
-            : mode,
-        );
+        // A project definition that only adds text composes with the definition it shares a key
+        // with, instead of replacing it. Every other case shadows, exactly as before.
+        if (previous && mode.promptStrategy === "append") {
+          byKey.set(mode.key, composeOnto(previous, mode));
+          continue;
+        }
+        byKey.set(mode.key, previous ? shadowing(mode, previous) : settled(mode));
       }
     }
   }
   return {
     modes: [...byKey.values()].sort((left, right) => left.key.localeCompare(right.key)),
     diagnostics,
+  };
+}
+
+/** `replace` is a resolution directive; selection only ever sees the host-level strategies. */
+function settled(mode: ResolvedMode): ResolvedMode {
+  return mode.promptStrategy === "replace"
+    ? { ...mode, promptStrategy: "replace_base" }
+    : mode;
+}
+
+function shadowing(mode: ResolvedMode, previous: ResolvedMode): ResolvedMode {
+  const next = settled(mode);
+  return {
+    ...next,
+    shadows: previous.scope,
+    ...(previous.path ? { shadowedPath: previous.path } : {}),
+  };
+}
+
+function unionKeys(a?: readonly string[], b?: readonly string[]): string[] | undefined {
+  const union = [...new Set([...(a ?? []), ...(b ?? [])])].sort();
+  return union.length > 0 ? union : undefined;
+}
+
+/**
+ * A project `append` over a definition it shares a key with: the shallower text, then the project's,
+ * as one definition. The result keeps the shallower host strategy — a `leader` contract that
+ * replaces the base prompt still replaces it — and carries what a fallback would need if the project
+ * half later cannot be used.
+ */
+function composeOnto(shallower: ResolvedMode, project: ResolvedMode): ResolvedMode {
+  const { shadows: _shadows, shadowedPath: _shadowed, promptPath: _prompt, ...base } = shallower;
+  const strategy = base.promptStrategy === "replace" ? "replace_base" : base.promptStrategy;
+  const composedFrom: ComposedContribution[] = [
+    ...(base.composedFrom ?? [{ scope: base.scope, ...(base.path ? { path: base.path } : {}) }]),
+    { scope: project.scope, ...(project.path ? { path: project.path } : {}) },
+  ];
+  const requires = unionKeys(base.requires, project.requires);
+  const conflictsWith = unionKeys(base.conflictsWith, project.conflictsWith);
+  return {
+    ...base,
+    promptStrategy: strategy,
+    label: project.label,
+    ...(project.description ? { description: project.description } : {}),
+    systemPrompt: `${base.systemPrompt}\n\n${project.systemPrompt}`,
+    ...(requires ? { requires } : {}),
+    ...(conflictsWith ? { conflictsWith } : {}),
+    ...(project.path ? { path: project.path } : {}),
+    scope: "project",
+    composedFrom,
+    fallback: {
+      scope: base.scope,
+      label: base.label,
+      promptStrategy: strategy,
+      systemPrompt: base.systemPrompt,
+      ...(requires ? { requires } : {}),
+      ...(conflictsWith ? { conflictsWith } : {}),
+      ...(base.path ? { path: base.path } : {}),
+    },
   };
 }
 
