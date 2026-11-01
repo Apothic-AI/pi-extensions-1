@@ -654,6 +654,12 @@
       "owner": "softwareco/owned/pi-extensions",
       "reason": "Root release-sbom script at 152% of the code budget; sequential verification/release narrative over shared subprocess plumbing, split deferred to its next contract change.",
       "reopen_trigger": "file grows past 837 LOC or the next owner-approved refactor touches this module"
+    },
+    {
+      "path": "packages/pi-modes/src/mode-definitions.ts",
+      "owner": "softwareco/owned/pi-extensions",
+      "reason": "The same-key append composition adds one resolution branch (composeOnto plus its two small helpers) to an existing brownfield module that already carried mode parsing, loading, saving and fingerprinting. Splitting that module is a refactor with its own review; mixing it into a behavioural fix would make both harder to judge. Owner-scoped and temporary.",
+      "reopen_trigger": "Before any further growth of this file, or as soon as the split is scheduled: mode loading must move to its own module and this exception must be deleted. The accompanying bead tracks the split; a stale entry (file back under budget) is rejected by the audit."
     }
   ]
 }

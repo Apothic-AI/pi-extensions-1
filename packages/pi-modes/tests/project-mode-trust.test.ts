@@ -227,9 +227,9 @@ test("a replaced built-in, global or outer project mode is named in the confirma
     for (const dir of [globalDir, outer, inner]) mkdirSync(dir);
     writeFileSync(join(globalDir, "mine.json"), modeFile("mine", "My global rules."));
     writeFileSync(join(outer, "team.json"), modeFile("team", "Operator's own team rules."));
-    writeFileSync(join(inner, "team.json"), modeFile("team", "Cloned repo rules."));
+    writeFileSync(join(inner, "team.json"), modeFile("team", "Cloned repo rules.", "replace"));
     writeFileSync(join(inner, "review.json"), modeFile("review", "Inner review.", "replace_base"));
-    writeFileSync(join(inner, "mine.json"), modeFile("mine", "Repository rules."));
+    writeFileSync(join(inner, "mine.json"), modeFile("mine", "Repository rules.", "replace"));
     writeFileSync(join(inner, "fresh.json"), modeFile("fresh", "New key."));
     const modes = loadModes({ globalDir, projectDirs: [outer, inner], projectTrusted: true }).modes;
     const byKey = new Map(modes.map((mode) => [mode.key, mode]));
@@ -307,7 +307,7 @@ test(
       assert.deepEqual(refused.activeOverlays(), []);
       assert.equal(readProjectModeApprovals(p.approvalsPath).size, 0);
       assert.match(refused.dialogs[0]?.title ?? "", /project mode "review"/);
-      assert.match(refused.dialogs[0]?.body ?? "", /replaces the builtin "review" mode/);
+      assert.match(refused.dialogs[0]?.body ?? "", /extends the builtin "review" mode/);
 
       const halfway = harness(p.cwd, { mode: "tui", answers: [true, false] });
       await halfway.command("mode")("final");
@@ -367,32 +367,45 @@ test(
       await warn.command("mode")("+review");
       await warn.command("mode-policy")("warn");
       p.write("review.json", modeFile("review", "EVIL PROJECT PROMPT"));
-      assert.equal(await warn.turnPrompt(), warn.nativePrompt);
+      // The composed definition degrades to the definition it extends: the project half is dropped
+      // and the built-in overlay it adds to still applies. Dropping the whole selection here is the
+      // failure that made a composition worse than no composition.
+      const unconfirmed = await warn.turnPrompt();
+      assert.doesNotMatch(unconfirmed, /EVIL PROJECT PROMPT/);
+      assert.match(unconfirmed, /Review the current work/);
       assert.ok(warn.notifications.some((message) => /is not confirmed/.test(message)));
+      assert.ok(warn.notifications.some((message) => /project text dropped/.test(message)));
 
       // Selecting an active mode again does not confirm it; the explicit flag does.
       await warn.command("mode")("+review");
-      assert.equal(await warn.turnPrompt(), warn.nativePrompt);
+      assert.doesNotMatch(await warn.turnPrompt(), /EVIL PROJECT PROMPT/);
       await warn.command("mode")("+review --confirm-project");
       assert.match(await warn.turnPrompt(), /EVIL PROJECT PROMPT/);
 
-      // A confirmed project file is edited under the allow drift policy.
+      // A confirmed project file is edited under the allow drift policy: the edit is unconfirmed,
+      // so the composed definition falls back to the built-in half again.
       await warn.command("mode-policy")("allow");
       p.write("review.json", modeFile("review", "EDITED LATER"));
-      assert.equal(await warn.turnPrompt(), warn.nativePrompt);
+      const drifted = await warn.turnPrompt();
+      assert.doesNotMatch(drifted, /EDITED LATER/);
+      assert.match(drifted, /Review the current work/);
 
-      // A legacy v1 session migrates onto the shadowing file.
+      // A legacy v1 session migrates onto the composed file: still unconfirmed, still no project text.
       const legacy = harness(p.cwd, {
         entries: [{ type: "custom", customType: MODE_STATE_TYPE, data: { key: "review" } }],
       });
       await legacy.run("session_start", { reason: "resume" });
-      assert.equal(await legacy.turnPrompt(), legacy.nativePrompt);
+      const migrated = await legacy.turnPrompt();
+      assert.doesNotMatch(migrated, /EDITED LATER/);
+      assert.match(migrated, /Review the current work/);
 
       // Withdrawing the approval takes effect on the next turn; reapproval restores it.
       await warn.command("mode-reapprove")("--confirm-project");
       assert.match(await warn.turnPrompt(), /EDITED LATER/);
       rmSync(p.approvalsPath);
-      assert.equal(await warn.turnPrompt(), warn.nativePrompt);
+      const withdrawn = await warn.turnPrompt();
+      assert.doesNotMatch(withdrawn, /EDITED LATER/);
+      assert.match(withdrawn, /Review the current work/);
       await warn.command("mode-reapprove")("--confirm-project");
       assert.match(await warn.turnPrompt(), /EDITED LATER/);
     } finally {
@@ -647,7 +660,7 @@ test(
       assert.deepEqual(blocked.activeOverlays(), []);
       assert.ok(
         blocked.notifications.some((message) =>
-          /not confirmed: review \(.*review\.json, replaces the builtin "review" mode\)/.test(
+          /not confirmed: review \(.*review\.json, extends the builtin "review" mode\)/.test(
             message,
           ),
         ),
@@ -665,11 +678,11 @@ test(
       await reloaded.run("session_start", { reason: "reload" });
       assert.match(await reloaded.turnPrompt(), /Repository review rules\./, "/reload keeps it");
       p.write("review.json", modeFile("review", "Changed after startup."));
-      assert.equal(
-        await reloaded.turnPrompt(),
-        reloaded.nativePrompt,
-        "a changed file is not acknowledged",
-      );
+      // The changed project half is not acknowledged, so the composition falls back to the
+      // built-in it extends: the project text is gone, the built-in overlay remains.
+      const changed = await reloaded.turnPrompt();
+      assert.doesNotMatch(changed, /Changed after startup\./, "a changed file is not acknowledged");
+      assert.match(changed, /Review the current work/);
 
       newProcess();
       const later = harness(p.cwd);
@@ -731,7 +744,7 @@ test("a confirmation does not cover a replacement that appeared after it", () =>
     const repo = join(root, "repo");
     mkdirSync(globalDir);
     mkdirSync(repo);
-    writeFileSync(join(repo, "notes.json"), modeFile("notes", "Repository notes."));
+    writeFileSync(join(repo, "notes.json"), modeFile("notes", "Repository notes.", "replace"));
     const load = () =>
       loadModes({ globalDir, projectDirs: [repo], projectTrusted: true }).modes.find(
         (mode) => mode.key === "notes",

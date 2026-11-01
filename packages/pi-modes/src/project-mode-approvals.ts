@@ -333,7 +333,14 @@ const EFFECT: Record<ResolvedMode["promptStrategy"], string> = {
 
 /** What a project mode takes over, in the words every message uses. */
 export function describeReplacement(mode: ResolvedMode): string {
-  if (!mode.shadows) return "";
+  if (!mode.shadows) {
+    // A composed project definition replaces nothing: it is added to the definition it shares a
+    // key with, so the dialog has to name that definition rather than stay silent about it.
+    const shallowest = mode.composedFrom?.[0];
+    return (mode.composedFrom?.length ?? 0) > 1 && shallowest
+      ? `extends the ${shallowest.scope} "${mode.key}" mode`
+      : "";
+  }
   if (mode.shadows === "project") {
     return `replaces the "${mode.key}" mode from ${mode.shadowedPath ? displaySafe(mode.shadowedPath) : "an outer directory"}`;
   }
