@@ -326,6 +326,7 @@ function promptExcerpt(prompt: string): { excerpt: string; shown: number; total:
 
 const EFFECT: Record<ResolvedMode["promptStrategy"], string> = {
   append: "adds its text to the system prompt",
+  replace: "replaces the definition it shares a key with",
   replace_base: "replaces the base system prompt",
   replace_final: "replaces the entire system prompt",
 };
