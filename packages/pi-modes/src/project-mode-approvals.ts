@@ -94,16 +94,16 @@ export function readProjectModeApprovals(path: string): Map<string, string> {
 /**
  * What a confirmation covers: the exact definition and what it replaces, so a mode confirmed while
  * it replaced nothing is asked about again once it takes over a built-in, global or outer mode.
+ *
+ * The *scope* it replaces (`shadows`) is part of the digest; the shadowed file's path is not. The
+ * path is a launcher artifact, not a property of what was confirmed: under a profile launcher the
+ * global modes live in a per-launch instance directory, so the same definition hashes differently
+ * on every launch and a recorded approval never matches. The dialog still names the shadowed file
+ * (`projectConfirmationBody`), so the operator keeps seeing which file is being replaced.
  */
 export function projectApprovalDigest(mode: ResolvedMode): string {
   return createHash("sha256")
-    .update(
-      JSON.stringify([
-        modeDefinitionFingerprint(mode).digest,
-        mode.shadows ?? null,
-        mode.shadowedPath ?? null,
-      ]),
-    )
+    .update(JSON.stringify([modeDefinitionFingerprint(mode).digest, mode.shadows ?? null]))
     .digest("hex");
 }
 

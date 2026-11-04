@@ -265,6 +265,47 @@ test("a replaced built-in, global or outer project mode is named in the confirma
   }
 });
 
+test("a confirmation survives a launcher that moves the shadowed file", () => {
+  // A profile launcher writes global modes into a fresh instance directory on every launch, so the
+  // same project definition shadows the same file at a different path each time. The path is a
+  // launcher artifact: if it were part of the digest, a recorded confirmation could never match at
+  // runtime and project modes would silently lose their composition on every launch.
+  const canonical: ResolvedMode = {
+    schemaVersion: 2,
+    key: "team",
+    label: "team",
+    promptStrategy: "append",
+    systemPrompt: "Operator's own team rules.",
+    scope: "project",
+    path: "/home/operator/space/.pi/modes/team.json",
+    shadows: "global",
+    shadowedPath: "/home/operator/.pi/agent/modes/team.json",
+  };
+  const relocaled: ResolvedMode = {
+    ...canonical,
+    shadowedPath: "/home/operator/.pi-profile-switch/instances/launch-Zx9Qm2/modes/team.json",
+  };
+
+  assert.equal(
+    projectApprovalDigest(canonical),
+    projectApprovalDigest(relocaled),
+    "where the shadowed file lives is not part of what the operator confirmed",
+  );
+
+  // The scope it replaces still is: a mode that stops shadowing a global definition is a different
+  // confirmation, which is the property the digest exists to protect.
+  assert.notEqual(
+    projectApprovalDigest(canonical),
+    projectApprovalDigest({ ...canonical, shadows: undefined, shadowedPath: undefined }),
+    "but the scope it replaces is still part of what the operator confirms",
+  );
+  assert.notEqual(
+    projectApprovalDigest(canonical),
+    projectApprovalDigest({ ...canonical, shadows: "builtin" }),
+    "shadowing a builtin instead of a global is a different confirmation",
+  );
+});
+
 test(
   "headless activation needs --confirm-project once per definition",
   harnessOptions,
