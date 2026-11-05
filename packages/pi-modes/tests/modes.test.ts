@@ -345,7 +345,7 @@ test("session selection is restored when PI_MODE is absent", () => {
   );
 });
 
-test("PI_MODE is consumed only on process startup, not reload or session replacement", () => {
+test("PI_MODE is consumed on startup and new sessions, not reload or resume", () => {
   for (const sessionKey of [null, "plan"] as const) {
     assert.deepEqual(
       resolveInitialModeSelection({
