@@ -95,15 +95,33 @@ export function readProjectModeApprovals(path: string): Map<string, string> {
  * What a confirmation covers: the exact definition and what it replaces, so a mode confirmed while
  * it replaced nothing is asked about again once it takes over a built-in, global or outer mode.
  *
- * The *scope* it replaces (`shadows`) is part of the digest; the shadowed file's path is not. The
- * path is a launcher artifact, not a property of what was confirmed: under a profile launcher the
- * global modes live in a per-launch instance directory, so the same definition hashes differently
- * on every launch and a recorded approval never matches. The dialog still names the shadowed file
+ * The tuple always carries three slots, because a record written before the launcher fix hashed
+ * three: `[fingerprint, shadows, shadowedPath]`. Collapsing it to two changed the arity, which
+ * invalidated every record whose mode shadows nothing — including every same-key `append`
+ * composition, where `composeOnto()` drops `shadows`/`shadowedPath` entirely. Keeping the slot and
+ * filling it with `null` where there is nothing stable to confirm preserves those records verbatim.
+ *
+ * The third slot holds a path only when that path is a stable property of what the operator
+ * confirmed. An outer project directory is stable, so shadowing a different outer file is a
+ * different confirmation. A global mode's file lives under the launcher's per-launch instance
+ * directory: the same definition shadows the same file at a different path on every launch, so the
+ * path is a launcher artifact rather than part of the trust identity, which the key and the scope
+ * already carry. A built-in has no file. The dialog still names the shadowed file
  * (`projectConfirmationBody`), so the operator keeps seeing which file is being replaced.
  */
+function confirmationShadowPath(mode: ResolvedMode): string | null {
+  return mode.shadows === "project" ? (mode.shadowedPath ?? null) : null;
+}
+
 export function projectApprovalDigest(mode: ResolvedMode): string {
   return createHash("sha256")
-    .update(JSON.stringify([modeDefinitionFingerprint(mode).digest, mode.shadows ?? null]))
+    .update(
+      JSON.stringify([
+        modeDefinitionFingerprint(mode).digest,
+        mode.shadows ?? null,
+        confirmationShadowPath(mode),
+      ]),
+    )
     .digest("hex");
 }
 
