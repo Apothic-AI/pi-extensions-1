@@ -51,7 +51,9 @@ Healthy state is quiet. Stale installs or unavailable checks produce a warning
 but never fail the Git operation. No installs, builds, lock edits, state stamps,
 Pi settings changes, or session reloads occur automatically.
 
-Use `node scripts/package-install-health.mjs` for a focused read-only check.
+Use `node scripts/package-install-health.mjs` for a focused read-only check. It judges only
+packages that own an install (`node_modules` present) and names the rest as not installed here,
+so it answers "is what this checkout owns consistent" rather than "is every sibling installed".
 `node scripts/agent-doctor.mjs` (also included in `just doctor`) reports the same
 result as `info.installConsistency` in JSON and exits nonzero on inconsistency
 or an unavailable checker. This is separate from Pi install-source provenance;
@@ -81,10 +83,22 @@ for ~25 minutes (AK6069; design in softwareco/infra/workstation
 
 - `scripts/land-canonical.sh <ref>` moves it: fetch, fast-forward (or `--reset`, refused
   while tracked files are modified), `npm ci --prefix` for every package whose manifest or
-  lock changed (pinned toolchain via `select-gate-node.sh`), install health, then a Pi smoke
+  lock changed (pinned toolchain via `select-gate-node.sh`), install health for the packages
+  that own an install here, then a Pi smoke
   (`pi --no-session -p ""`, which loads every extension and calls no model; `--list-models` does not fail on a broken extension). On any failure it moves
   back with `git reset --keep`, reinstalls the previous versions and smokes again. It prints
   a JSON receipt. Installs happen because an agent ran it, never because of a Git event.
+
+Install health at landing is decided by **ownership, not by the shape of the diff**: a tracked
+package whose `node_modules` exists owns an install and must agree with its lock, while a
+package this checkout never installed has no state that can be stale and is reported rather
+than failed. This is why a landing no longer has to install every sibling first, and why the
+landing gate cannot be narrowed by what a change happens to touch — an unrelated root or
+`scripts/` change contributes nothing to the rule, so it can neither widen nor skip the check.
+The live-runtime half of the AK6069 invariant is enforced by the smoke, which fails on any
+extension Pi cannot load. The stricter reading is unchanged where it belongs: the build gate
+`scripts/validate-package-installs.mjs` still fails an uninstalled tree, because there absence
+means the tree was not prepared before gating.
 - `.githooks/pre-commit` runs `scripts/commit-install-guard.mjs`: in the canonical checkout
   only, a commit that stages a package's `package.json` or `package-lock.json` is refused
   until this checkout's installs satisfy it. Linked worktrees are exempt; drift in packages

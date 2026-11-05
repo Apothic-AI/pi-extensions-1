@@ -92,6 +92,15 @@ function install(root, pkg) {
   json(root, `${pkg}/node_modules/.package-lock.json`, { lockfileVersion: 3, packages: { 'node_modules/dep': entry } });
 }
 
+// A tracked package can be present without ever having been installed here (a bulk reset, or a
+// package Pi does not load). Creating that state must not trip the pre-commit guard that protects
+// this same checkout, so that one fixture commit bypasses the owner-managed hook lane.
+function addUninstalledPackage({ root, git }, pkg = 'packages/never') {
+  setDep(root, pkg, '1.0.0');
+  git(root, 'add', '.');
+  git(root, '-c', 'core.hooksPath=.git/hooks', 'commit', '-qm', `add ${pkg}, never installed here`);
+}
+
 test('a commit that bumps a dependency this checkout has not installed is refused, and passes once installed', t => {
   const { root, run, git } = fixture(t);
   setDep(root, 'packages/demo', '2.0.0');
@@ -229,6 +238,105 @@ test('landing links installed host packages to the Pi on PATH, and the health ch
   assert.match(landed.stderr, /packages\/demo: @earendil-works\/pi-ai 1\.0\.0 -> host 9\.0\.0/);
   // Not a host package: still installed and checked against the lock.
   assert.equal(fs.lstatSync(path.join(root, 'packages/demo/node_modules/dep')).isSymbolicLink(), false);
+  const health = run(root, 'node', ['scripts/package-install-health.mjs']);
+  assert.equal(health.status, 0, health.stdout + health.stderr);
+});
+
+test('a landing succeeds while tracked packages were never installed here', t => {
+  const { base, root, run, git, npmCalls } = fixture(t);
+  addUninstalledPackage({ root, git });
+  addUninstalledPackage({ root, git }, 'packages/never-two');
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  setDep(wt, 'packages/demo', '2.0.0');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'bump demo');
+
+  // Before this rule the same landing rolled back on the two never-installed siblings.
+  const landed = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(landed.status, 0, landed.stderr);
+  assert.equal(JSON.parse(landed.stdout.trim().split('\n').at(-1)).outcome, 'landed');
+  assert.match(landed.stderr, /provably not installed here/);
+  assert.deepEqual(npmCalls(), ['ci --prefix packages/demo --no-audit --no-fund']);
+});
+
+test('a landing whose installed package is stale still moves back', t => {
+  const { base, root, run, git } = fixture(t);
+  const previous = git(root, 'rev-parse', 'HEAD');
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  write(wt, 'packages/demo/src/thing.ts', 'export const x = 2;\n');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'change demo source');
+  json(root, 'packages/demo/node_modules/dep/package.json', { name: 'dep', version: '0.9.0' });
+
+  const result = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /installed 0\.9\.0; expected 1\.0\.0/);
+  // The staleness predates the landing, so the restored tree is unhealthy too and the receipt says so.
+  assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).outcome, 'rollback_unhealthy');
+  assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
+});
+
+test('a landing may add an uninstalled package and delete an installed one', t => {
+  const { base, root, run, git, npmCalls } = fixture(t);
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  setDep(wt, 'packages/added', '1.0.0');
+  git(wt, 'rm', '-q', '-r', 'packages/other');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'add one package, drop another');
+
+  const landed = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(landed.status, 0, landed.stderr);
+  assert.equal(JSON.parse(landed.stdout.trim().split('\n').at(-1)).outcome, 'landed');
+  // The added package installs from its own lock; the deleted one keeps untracked node_modules on
+  // disk and must stop being an admission subject rather than fail the move.
+  assert.deepEqual(npmCalls(), ['ci --prefix packages/added --no-audit --no-fund']);
+});
+
+test('a root and scripts change is admitted, and does not narrow the admission', t => {
+  const { base, root, run, git } = fixture(t);
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  write(wt, 'scripts/helper.sh', '#!/usr/bin/env bash\necho hi\n', 0o755);
+  write(wt, 'NOTES.md', 'root notes\n');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'root and scripts only');
+
+  const landed = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(landed.status, 0, landed.stderr);
+
+  // The same shape of diff is still blocked by an unhealthy install it does not touch: an unowned
+  // path must never shrink what is admitted, which is what a path-derived scope got wrong.
+  const previous = git(root, 'rev-parse', 'HEAD');
+  json(root, 'packages/demo/node_modules/dep/package.json', { name: 'dep', version: '0.9.0' });
+  write(wt, 'scripts/helper.sh', '#!/usr/bin/env bash\necho hi again\n', 0o755);
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'root and scripts only, again');
+  const blocked = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /installed 0\.9\.0; expected 1\.0\.0/);
+  assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
+});
+
+test('a failed landing restores a tree that still has never-installed packages', t => {
+  const { base, root, run, git } = fixture(t);
+  addUninstalledPackage({ root, git });
+  const previous = git(root, 'rev-parse', 'HEAD');
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  setDep(wt, 'packages/added', '1.0.0');
+  write(wt, 'BROKEN', 'the TypeScript 7 import\n');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'add a package, break pi');
+
+  const result = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Pi smoke failed/);
+  assert.equal(JSON.parse(result.stdout.trim().split('\n').at(-1)).outcome, 'rolled_back');
+  assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
+  // Rollback topology: the restored tree is admitted, never-installed packages included.
   const health = run(root, 'node', ['scripts/package-install-health.mjs']);
   assert.equal(health.status, 0, health.stdout + health.stderr);
 });
