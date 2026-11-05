@@ -92,6 +92,15 @@ function install(root, pkg) {
   json(root, `${pkg}/node_modules/.package-lock.json`, { lockfileVersion: 3, packages: { 'node_modules/dep': entry } });
 }
 
+// A tracked package can exist without ever having been installed here (a bulk reset, or a package Pi
+// does not load). Creating that state in the fixture must not trip the pre-commit guard, which is
+// what refuses exactly this in the canonical checkout; the state is the subject, not its creation.
+function addUninstalledPackage({ root, git }, pkg = 'packages/never') {
+  setDep(root, pkg, '1.0.0');
+  git(root, 'add', '.');
+  git(root, '-c', 'core.hooksPath=.git/hooks', 'commit', '-qm', `add ${pkg}, never installed here`);
+}
+
 test('a commit that bumps a dependency this checkout has not installed is refused, and passes once installed', t => {
   const { root, run, git } = fixture(t);
   setDep(root, 'packages/demo', '2.0.0');
@@ -141,6 +150,7 @@ test('landing installs the packages whose manifests changed and smoke-tests Pi',
   assert.equal(landed.status, 0, landed.stderr);
   const receipt = JSON.parse(landed.stdout.trim().split('\n').at(-1));
   assert.equal(receipt.outcome, 'landed');
+  assert.equal(receipt.scope, 'packages/demo');
   assert.equal(receipt.head, git(root, 'rev-parse', 'dev'));
   assert.deepEqual(npmCalls(), ['ci --prefix packages/demo --no-audit --no-fund']);
   assert.equal(fs.readFileSync(path.join(root, 'NOTES.md'), 'utf8'), 'wip\n');
@@ -161,6 +171,7 @@ test('a landing whose Pi smoke fails moves back and reinstalls the previous vers
   assert.match(result.stderr, /Pi smoke failed .*Failed to load extension/);
   const receipt = JSON.parse(result.stdout.trim().split('\n').at(-1));
   assert.equal(receipt.outcome, 'rolled_back');
+  assert.equal(receipt.scope, 'packages/demo');
   assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
   assert.equal(fs.existsSync(path.join(root, 'BROKEN')), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'packages/demo/node_modules/dep/package.json'), 'utf8')).version, '1.0.0');
@@ -231,6 +242,110 @@ test('landing links installed host packages to the Pi on PATH, and the health ch
   assert.equal(fs.lstatSync(path.join(root, 'packages/demo/node_modules/dep')).isSymbolicLink(), false);
   const health = run(root, 'node', ['scripts/package-install-health.mjs']);
   assert.equal(health.status, 0, health.stdout + health.stderr);
+});
+
+test('a source-only landing admits only the package whose source moved, not uninstalled siblings', t => {
+  const { base, root, run, git, npmCalls } = fixture(t);
+  // A tracked package that was never installed in this checkout: not this landing's business.
+  addUninstalledPackage({ root, git });
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  write(wt, 'packages/demo/src/thing.ts', 'export const x = 1;\n'); // source only: no manifest, no lock
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'change demo source');
+
+  const landed = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(landed.status, 0, landed.stderr);
+  const receipt = JSON.parse(landed.stdout.trim().split('\n').at(-1));
+  assert.equal(receipt.outcome, 'landed');
+  assert.equal(receipt.scope, 'packages/demo');
+  assert.deepEqual(npmCalls(), [], 'no manifest changed, so nothing was installed');
+  assert.match(landed.stderr, /install health \(scoped: packages\/demo\)/);
+
+  // The default is unchanged: the fleet-wide check still names the uninstalled sibling.
+  const fleet = run(root, 'node', ['scripts/package-install-health.mjs']);
+  assert.equal(fleet.status, 1, fleet.stdout);
+  assert.match(fleet.stdout, /packages\/never/);
+});
+
+test('a landing whose changed package install is stale moves back', t => {
+  const { base, root, run, git } = fixture(t);
+  const previous = git(root, 'rev-parse', 'HEAD');
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  write(wt, 'packages/demo/src/thing.ts', 'export const x = 2;\n');
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'change demo source');
+  // The install this landing would serve is already stale in the canonical checkout.
+  json(root, 'packages/demo/node_modules/dep/package.json', { name: 'dep', version: '0.9.0' });
+
+  const result = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /- packages\/demo: \d+ issue\(s\)[\s\S]*node_modules\/dep: installed 0\.9\.0; expected 1\.0\.0/);
+  const receipt = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  // The staleness predates the landing, so the previous tree is unhealthy too: the receipt says so
+  // rather than claiming a clean rollback.
+  assert.equal(receipt.outcome, 'rollback_unhealthy');
+  assert.equal(receipt.scope, 'packages/demo');
+  assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
+});
+
+test('a diff that owns no install keeps the fleet-wide admission', t => {
+  const { base, root, run, git } = fixture(t);
+  addUninstalledPackage({ root, git });
+  const previous = git(root, 'rev-parse', 'HEAD');
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  write(wt, 'scripts/helper.sh', '#!/usr/bin/env bash\necho hi\n', 0o755); // root script: owns no install
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'root script only');
+
+  const result = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /install health \(fleet-wide\)/);
+  assert.match(result.stderr, /packages\/never/, 'the conservative check still names the uninstalled owner');
+  const receipt = JSON.parse(result.stdout.trim().split('\n').at(-1));
+  assert.equal(receipt.scope, 'fleet');
+  assert.equal(git(root, 'rev-parse', 'HEAD'), previous);
+});
+
+test('a root manifest change is never narrowed to packages that did not change', t => {
+  const { base, root, run, git } = fixture(t);
+  const wt = path.join(base, 'wt');
+  git(root, 'worktree', 'add', '-q', '-b', 'dev', wt);
+  json(wt, 'package.json', { name: 'fixture', type: 'module', scripts: { probe: 'true' } });
+  git(wt, 'add', '.');
+  git(wt, 'commit', '-qm', 'root manifest only');
+
+  const landed = run(root, 'bash', ['scripts/land-canonical.sh', 'dev']);
+  assert.equal(landed.status, 0, landed.stderr);
+  const receipt = JSON.parse(landed.stdout.trim().split('\n').at(-1));
+  assert.equal(receipt.outcome, 'landed');
+  assert.equal(receipt.scope, 'fleet');
+});
+
+test('the scoped admission refuses an empty or unknown owner selection', t => {
+  const { root, run } = fixture(t);
+  const health = (...args) => run(root, 'node', ['scripts/package-install-health.mjs', ...args]);
+
+  const missing = health('--package-root');
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /needs a package path/);
+
+  const unknown = health('--package-root', 'packages/nope');
+  assert.equal(unknown.status, 2);
+  assert.match(unknown.stderr, /unknown package owner: packages\/nope/);
+
+  const rootOwner = health('--package-root', '.');
+  assert.equal(rootOwner.status, 2, 'the dependency-free root installs nothing and is not a subject');
+
+  const narrowHook = health('--hook', 'post-merge', '--package-root', 'packages/demo');
+  assert.equal(narrowHook.status, 2);
+  assert.match(narrowHook.stderr, /warns about the whole checkout/);
+
+  const scoped = health('--package-root', 'packages/demo');
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.match(scoped.stdout, /scoped to: packages\/demo/);
 });
 
 test('without a Pi executable the landing leaves host packages as installed', t => {

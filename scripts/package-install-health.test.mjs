@@ -200,6 +200,37 @@ test('squash merge and removed lockfiles still report current-tree inconsistency
   const result = git(root, 'checkout', '-q', 'main');
   assert.match(result.stderr, /requires a tracked package-lock/);
 });
+test('an explicit owner selection admits that owner only, and the default stays fleet-wide', t => {
+  const root = fixture(t);
+  // A second tracked package with a lock that was never installed in this checkout.
+  json(root, 'packages/never/package.json', { name: 'never', dependencies: { dep: '*' } });
+  json(root, 'packages/never/package-lock.json', { lockfileVersion: 3, packages: {
+    '': { name: 'never', dependencies: { dep: '*' } },
+    'node_modules/dep': { version: '1.0.0', resolved: 'https://registry.example/dep-1.0.0.tgz', integrity: 'sha512-1.0.0' },
+  } });
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'a package that is never installed here');
+  const health = (...args) => run(root, 'node', ['scripts/package-install-health.mjs', ...args]);
+
+  const fleet = health();
+  assert.equal(fleet.status, 1, fleet.stdout);
+  assert.match(fleet.stdout, /packages\/never/);
+
+  const scoped = health('--package-root', 'packages/demo');
+  assert.equal(scoped.status, 0, scoped.stderr);
+  assert.match(scoped.stdout, /consistent \(1 package\(s\); scoped to: packages\/demo/);
+
+  // The selected owner is still admitted: its own stale install fails the scoped check.
+  bump(root);
+  git(root, 'add', 'packages/demo/package-lock.json');
+  git(root, 'commit', '-qm', 'new lock');
+  const stale = health('--package-root', 'packages/demo');
+  assert.equal(stale.status, 1, stale.stdout);
+  assert.match(stale.stdout, /- packages\/demo: \d+ issue\(s\)/);
+  assert.match(stale.stdout, /node_modules\/dep: installed 1\.0\.0; expected 2\.0\.0/);
+  assert.match(stale.stdout, /scoped to: packages\/demo/);
+});
+
 test('unavailable Node warns without failing the real Git operation', t => {
   const root = fixture(t); install(root);
   const bin = path.join(root, 'home/bin'); fs.mkdirSync(bin);
