@@ -434,9 +434,7 @@ export function loadModes(options: {
 
 /** `replace` is a resolution directive; selection only ever sees the host-level strategies. */
 function settled(mode: ResolvedMode): ResolvedMode {
-  return mode.promptStrategy === "replace"
-    ? { ...mode, promptStrategy: "replace_base" }
-    : mode;
+  return mode.promptStrategy === "replace" ? { ...mode, promptStrategy: "replace_base" } : mode;
 }
 
 function shadowing(mode: ResolvedMode, previous: ResolvedMode): ResolvedMode {
