@@ -314,7 +314,9 @@ export default function modeExtension(pi: ExtensionAPI) {
     const loaded = currentModes(ctx);
     const replayed = replay(ctx, loaded.modes);
     const initial = resolveInitialSelection({
-      applyEnvironment: event.reason === "startup",
+      // A fresh /new session has an empty branch, so carry the process role selector into it.
+      // /resume, /reload, and /fork must continue replaying the selected branch instead.
+      applyEnvironment: event.reason === "startup" || event.reason === "new",
       environmentValue: process.env.PI_MODE,
       compositionEnvironmentValue: process.env.PI_MODES,
       sessionSelection: replayed.selection,
