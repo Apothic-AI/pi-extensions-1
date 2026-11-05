@@ -218,6 +218,8 @@ test('a tracked package that owns no install is reported, not failed', t => {
   } });
   git(root, 'add', '.');
   git(root, 'commit', '-qm', 'a package that is never installed here');
+  // Isolated settings naming nothing: ownership is proven, so a plain absence can be excused.
+  json(root, 'home/.pi/agent/settings.json', { packages: [] });
   const health = () => run(root, process.execPath, ['scripts/package-install-health.mjs']);
 
   // The build gate keeps the strict reading: there, absence means the tree was not prepared.
@@ -321,18 +323,59 @@ test('a package the live Pi loads is never excused by absence', t => {
   git(root, 'add', '.');
   git(root, 'commit', '-qm', 'never installed');
   const settings = path.join(root, 'home', 'pi-settings.json');
-  json(root, 'home/pi-settings.json', { packages: [path.join(root, 'packages/never')] });
+  // Every form Pi's isLocalPath() accepts as local, including `file:`, `~` and a path relative to the
+  // settings file. A scheme-shaped string must not be mistaken for a package source.
+  const localForms = [
+    ['an absolute path', () => path.join(root, 'packages/never')],
+    ['a file: URL', () => `file://${path.join(root, 'packages/never')}`],
+    ['a tilde path', () => '~/../packages/never'],
+    ['a path relative to the settings file', () => '../packages/never'],
+  ];
+  for (const [name, source] of localForms) {
+    json(root, 'home/pi-settings.json', { packages: [source()] });
+    // The fixture's own home, so `~` lands inside it instead of the operator's real home directory.
+    const live = packageInstallHealth(root, { settingsPath: settings, homeDir: path.join(root, 'home') });
+    assert.deepEqual(live.liveOwners, ['packages/never'], `${name} is recognised as local`);
+    assert.equal(live.ok, false, `${name}: absence is fatal for a package Pi loads from this checkout`);
+    assert.ok(live.issues.some(issue => issue.package === 'packages/never'), name);
+    assert.deepEqual(live.notInstalled, [], name);
+  }
 
-  const live = packageInstallHealth(root, { settingsPath: settings });
-  assert.deepEqual(live.liveOwners, ['packages/never']);
-  assert.equal(live.ok, false, 'absence is fatal for a package Pi loads from this checkout');
-  assert.ok(live.issues.some(issue => issue.package === 'packages/never'));
-
-  // The same tree is admitted when nothing loads it: the rule is ownership, not installation alone.
-  const unused = packageInstallHealth(root, { settingsPath: path.join(root, 'home', 'missing.json') });
+  // The same tree is admitted only when ownership is proven and names nothing: the rule is ownership,
+  // not installation alone.
+  json(root, 'home/pi-settings.json', { packages: [] });
+  const unused = packageInstallHealth(root, { settingsPath: settings });
+  assert.equal(unused.ownershipProven, true);
   assert.equal(unused.ok, true, JSON.stringify(unused.issues));
   assert.deepEqual(unused.notInstalled, ['packages/never']);
-  assert.equal(unused.settingsReadable, false);
+});
+
+test('unreadable or malformed settings never excuse an absence', t => {
+  const root = fixture(t);
+  json(root, 'packages/never/package.json', { name: 'never', dependencies: { dep: '*' } });
+  json(root, 'packages/never/package-lock.json', { lockfileVersion: 3, packages: {
+    '': { name: 'never', dependencies: { dep: '*' } },
+    'node_modules/dep': { version: '1.0.0', resolved: 'https://registry.example/dep-1.0.0.tgz', integrity: 'sha512-1.0.0' },
+  } });
+  git(root, 'add', '.');
+  git(root, 'commit', '-qm', 'never installed');
+  const settings = path.join(root, 'home', 'pi-settings.json');
+  const cases = [
+    ['missing settings', () => {}],
+    ['unparseable settings', () => write(root, 'home/pi-settings.json', '{ not json')],
+    ['settings without a packages array', () => json(root, 'home/pi-settings.json', { packages: 'nope' })],
+    ['a local source it cannot resolve', () => json(root, 'home/pi-settings.json', { packages: ['file://%zz'] })],
+  ];
+
+  for (const [name, prepare] of cases) {
+    fs.rmSync(settings, { force: true });
+    prepare();
+    const result = packageInstallHealth(root, { settingsPath: settings });
+    assert.equal(result.ownershipProven, false, `${name} must not prove ownership`);
+    assert.deepEqual(result.notInstalled, [], `${name} must not excuse anything`);
+    assert.equal(result.ok, false, `${name} must fail closed`);
+    assert.ok(result.issues.some(issue => issue.package === 'packages/never'), name);
+  }
 });
 
 test('unavailable Node warns without failing the real Git operation', t => {

@@ -46,6 +46,9 @@ function fixture(t) {
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const root = path.join(base, 'repo'), bin = path.join(base, 'bin');
   fs.mkdirSync(root);
+  // Isolated Pi settings: the admission reads ownership by default, so a fixture must own that input
+  // rather than inherit the operator's. Naming nothing proves no package is loaded from this checkout.
+  write(base, 'home/.pi/agent/settings.json', JSON.stringify({ packages: [] }));
   write(bin, 'npm', FAKE_NPM, 0o755);
   write(bin, 'smoke', FAKE_SMOKE, 0o755);
   const clean = { ...process.env };
