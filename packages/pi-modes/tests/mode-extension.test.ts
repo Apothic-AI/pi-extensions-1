@@ -84,6 +84,67 @@ function harness(
   return { entries, commands, handlers, notifications, statuses, ctx };
 }
 
+test("new sessions inherit the process mode selection", async () => {
+  const previous = process.env.PI_MODE;
+  const previousComposition = process.env.PI_MODES;
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  const root = mkdtempSync(join(tmpdir(), "pi-modes-new-session-"));
+  try {
+    process.env.PI_CODING_AGENT_DIR = root;
+    process.env.PI_MODE = "review";
+    delete process.env.PI_MODES;
+    const h = harness();
+    const handler = h.handlers.get("session_start")?.[0];
+    assert.ok(handler);
+
+    await handler({ reason: "new" }, h.ctx);
+    const latest = h.entries.at(-1) as { customType: string; data: unknown };
+    assert.equal(latest.customType, MODE_STATE_TYPE_V3);
+    assert.deepEqual(
+      {
+        baseKey: (latest.data as { baseKey: unknown }).baseKey,
+        overlayKeys: (latest.data as { overlayKeys: unknown }).overlayKeys,
+        source: (latest.data as { source: string }).source,
+      },
+      { baseKey: null, overlayKeys: ["review"], source: "startup" },
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_MODE;
+    else process.env.PI_MODE = previous;
+    if (previousComposition === undefined) delete process.env.PI_MODES;
+    else process.env.PI_MODES = previousComposition;
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resume restores its session mode instead of applying the process mode", async () => {
+  const previous = process.env.PI_MODE;
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  const root = mkdtempSync(join(tmpdir(), "pi-modes-resume-session-"));
+  try {
+    process.env.PI_CODING_AGENT_DIR = root;
+    process.env.PI_MODE = "review";
+    const existing = {
+      type: "custom",
+      customType: MODE_STATE_TYPE_V3,
+      data: { baseKey: null, overlayKeys: ["explain"] },
+    };
+    const h = harness([existing]);
+    const handler = h.handlers.get("session_start")?.[0];
+    assert.ok(handler);
+    await handler({ reason: "resume" }, h.ctx);
+    assert.equal(h.entries.at(-1), existing);
+  } finally {
+    if (previous === undefined) delete process.env.PI_MODE;
+    else process.env.PI_MODE = previous;
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("session_start freezes a legacy v1 append slot into fingerprinted v3", async () => {
   const h = harness([{ type: "custom", customType: MODE_STATE_TYPE, data: { key: "review" } }]);
   const handler = h.handlers.get("session_start")?.[0];
