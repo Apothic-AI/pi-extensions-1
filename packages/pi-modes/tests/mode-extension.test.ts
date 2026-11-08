@@ -50,6 +50,7 @@ function harness(
   const handlers = new Map<string, EventHandler[]>();
   const notifications: Array<{ message: string; type: string }> = [];
   const statuses: Array<string | undefined> = [];
+  const confirms: Array<{ title: string; message: string }> = [];
   const pi = {
     registerEntryRenderer() {},
     registerCommand(name: string, command: RegisteredCommand) {
@@ -73,7 +74,8 @@ function harness(
       theme: { fg: (_color: string, text: string) => text },
       setStatus: (_key: string, value: string | undefined) => statuses.push(value),
       notify: (message: string, type: string) => notifications.push({ message, type }),
-      confirm: async () => {
+      confirm: async (title: string, message: string) => {
+        confirms.push({ title, message });
         options.onConfirm?.();
         return options.confirm ?? false;
       },
@@ -81,7 +83,7 @@ function harness(
     getSystemPromptOptions: () => ({ cwd: process.cwd(), selectedTools: ["read"] }),
     getSystemPrompt: () => "HOST",
   } as unknown as ExtensionCommandContext;
-  return { entries, commands, handlers, notifications, statuses, ctx };
+  return { entries, commands, handlers, notifications, statuses, confirms, ctx };
 }
 
 test("new sessions inherit the process mode selection", async () => {
@@ -690,8 +692,19 @@ test("--expect covering the selection skips the TUI confirm; its absence does no
 
     // Without --expect the dialog is offered (and a "no" answer aborts).
     confirms = 0;
+    h.confirms.length = 0;
     await h.commands.get("mode-reapprove")?.handler("", h.ctx);
     assert.ok(confirms > 0, "the interactive confirm must still run without --expect");
+    // FT-41: the body must name the digest being attested, and it must be the value --expect
+    // compares, so it can be copied straight into a headless call.
+    const body = h.confirms[0]?.message ?? "";
+    assert.match(
+      body,
+      new RegExp(digest),
+      "the confirm body must contain the full attesting digest",
+    );
+    assert.match(body, /\/mode-reapprove --expect/, "the body must say what the digest is for");
+    assert.match(body, /Changed since activation: review/, "the drifted key is still named");
     const beforeAbort = h.entries.length;
 
     // With --expect covering the selection, no dialog blocks the call and it persists.

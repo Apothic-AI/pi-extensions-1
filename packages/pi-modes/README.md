@@ -38,7 +38,7 @@ Mode activation changes prompt policy only. It never grants tools, mutation, con
 | `/mode presets` | List discovered named compositions and diagnostics. |
 | `/mode-status [--json]` | Show selection, effective components, hashes, estimates, provenance, drift, and fallback. |
 | `/mode-preview [--json] [selection]` | Preview components and the composed prompt without activation. |
-| `/mode-reapprove [--confirm-exact] [--confirm-project] [--expect <sha256>]` | Explicitly accept changed active definitions and refresh fingerprints. `--expect` (single sha256, or `key=sha256,...`) refuses unless the definition digest matches, which pins the attestation for a non-interactive caller. |
+| `/mode-reapprove [--confirm-exact] [--confirm-project] [--expect <sha256>]` | Explicitly accept changed active definitions and refresh fingerprints. `--expect` (single sha256, or `key=sha256,...`) refuses unless the definition digest matches, which pins the attestation for a non-interactive caller. In the TUI the confirm names the digest it is about to accept — the same value `--expect` compares, so it can be copied straight into a headless call. |
 | `/mode-policy <block\|warn\|allow>` | Choose what later definition drift does; `block` is the default. |
 | `/mode-new [--project] <key>` | Save a new strict mode without activating it. |
 | `/mode-edit <key>` | Edit a custom mode; active edits become blocked drift until reapproved. |

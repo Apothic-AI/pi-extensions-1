@@ -339,16 +339,44 @@ export function registerModeCommands(pi: ExtensionAPI, services: ModeCommandServ
               flags.expectedDefinitionDigests.get("") !== undefined ||
               flags.expectedDefinitionDigests.get(key) !== undefined,
           );
+        // FT-41: name what the operator is about to attest to, not just which keys drifted. The
+        // digest shown is the per-key `modeDefinitionFingerprint` digest the `--expect` gate
+        // compares, so an operator who wants to move to a headless call can copy it straight out of
+        // the dialog. One key shows the bare value `--expect <sha256>` takes; several show one line
+        // each, which is the `key=sha256` form joined with commas.
+        const attesting = selectedKeys(replayed.selection)
+          .map((key) => {
+            const mode = loaded.modes.find((candidate) => candidate.key === key);
+            return mode ? { key, digest: modeDefinitionFingerprint(mode).digest } : undefined;
+          })
+          .filter((entry): entry is { key: string; digest: string } => entry !== undefined);
+        const single = attesting.length === 1 ? attesting[0]?.digest : undefined;
+        const attestLines =
+          attesting.length === 0
+            ? []
+            : single !== undefined
+              ? [
+                  "Accepting definition digest (what /mode-reapprove --expect compares):",
+                  `  ${single}`,
+                ]
+              : [
+                  "Accepting definition digests (what /mode-reapprove --expect compares, as key=sha256):",
+                  ...attesting.map((entry) => `  ${entry.key}  ${entry.digest}`),
+                ];
+        const confirmBody = [
+          ...(unshownDrift.length > 0
+            ? [`Changed since activation: ${unshownDrift.join(", ")}.`]
+            : []),
+          ...attestLines,
+          unshownDrift.length > 0
+            ? "Preview first if that was unexpected."
+            : "Preview first if the drift was unexpected.",
+        ].join("\n");
         if (
           ctx.mode === "tui" &&
           !attestedFully &&
           (unshownDrift.length > 0 || shown.size === 0) &&
-          !(await ctx.ui.confirm(
-            "Reapprove active prompt mode definitions?",
-            unshownDrift.length > 0
-              ? `Changed since activation: ${unshownDrift.join(", ")}. Preview first if that was unexpected.`
-              : "Preview first if the drift was unexpected.",
-          ))
+          !(await ctx.ui.confirm("Reapprove active prompt mode definitions?", confirmBody))
         )
           return;
         if (unconfirmed.length > 0) services.recordProjectModeApprovals(unconfirmed);
