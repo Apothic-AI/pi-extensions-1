@@ -570,3 +570,141 @@ test("commands reject unknown arguments without mutating drift state", async () 
   }, /Usage: \/mode-status/);
   assert.equal(h.entries.length, count);
 });
+
+// --expect on /mode-reapprove: the out-of-band attestation (FT-40). A mismatch must refuse
+// before anything is persisted; a match must persist the refreshed digest.
+test("reapprove --expect refuses on a mismatched digest and persists on a match", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-modes-expect-"));
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  const previousMode = process.env.PI_MODE;
+  try {
+    process.env.PI_CODING_AGENT_DIR = root;
+    delete process.env.PI_MODE;
+    mkdirSync(join(root, "modes"), { recursive: true });
+    writeFileSync(
+      join(root, "modes", "review.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        key: "review",
+        label: "Review",
+        promptStrategy: "append",
+        systemPrompt: "review the change",
+      }),
+    );
+    // Start on the real definition, then edit the file so the recorded digest drifts.
+    const h = harness();
+    await h.commands.get("mode")?.handler("review", h.ctx);
+    const recorded = h.entries.at(-1) as {
+      data: { fingerprints: Record<string, { digest: string }> };
+    };
+    const staleDigest = recorded.data.fingerprints.review.digest;
+    writeFileSync(
+      join(root, "modes", "review.json"),
+      JSON.stringify({
+        schemaVersion: 2,
+        key: "review",
+        label: "Review",
+        promptStrategy: "append",
+        systemPrompt: "review the change carefully",
+      }),
+    );
+    const before = h.entries.length;
+
+    // A stale attestation refuses and appends nothing.
+    await assert.rejects(async () => {
+      await h.commands.get("mode-reapprove")?.handler(`--expect ${staleDigest}`, h.ctx);
+    }, /Mode definitions changed after confirmation/);
+    assert.equal(h.entries.length, before, "a refused --expect must not persist");
+
+    // The digest of the CURRENT file at the path the handler discovers is what --expect takes.
+    const { modeDefinitionFingerprint } = await import("../src/modes.ts");
+    const { readModeFile } = await import("../src/mode-definitions.ts");
+    const { definition } = readModeFile(join(root, "modes", "review.json"));
+    const current = modeDefinitionFingerprint({
+      ...definition,
+      scope: "global",
+      path: join(root, "modes", "review.json"),
+    }).digest;
+
+    await h.commands.get("mode-reapprove")?.handler(`--expect ${current}`, h.ctx);
+    const latest = h.entries.at(-1) as {
+      customType: string;
+      data: { source: string; fingerprints: Record<string, { digest: string }> };
+    };
+    assert.equal(latest.customType, MODE_STATE_TYPE_V3);
+    assert.equal(latest.data.source, "reapprove");
+    assert.equal(latest.data.fingerprints.review.digest, current);
+  } finally {
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+    if (previousMode === undefined) delete process.env.PI_MODE;
+    else process.env.PI_MODE = previousMode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A non-interactive caller must be able to finish. With no drift to show, the TUI confirm is
+// skipped for a really-clean selection anyway; with drift, --expect covering the selection is the
+// attestation and the generic "preview first if that was unexpected" prompt adds nothing. Without
+// --expect the dialog still guards the action.
+test("--expect covering the selection skips the TUI confirm; its absence does not", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-modes-expect-dialog-"));
+  const previousDir = process.env.PI_CODING_AGENT_DIR;
+  const previousMode = process.env.PI_MODE;
+  try {
+    process.env.PI_CODING_AGENT_DIR = root;
+    delete process.env.PI_MODE;
+    mkdirSync(join(root, "modes"), { recursive: true });
+    const write = (text: string) =>
+      writeFileSync(
+        join(root, "modes", "review.json"),
+        JSON.stringify({
+          schemaVersion: 2,
+          key: "review",
+          label: "Review",
+          promptStrategy: "append",
+          systemPrompt: text,
+        }),
+      );
+
+    write("first");
+    let confirms = 0;
+    const h = harness([], {
+      mode: "tui",
+      confirm: false,
+      onConfirm: () => {
+        confirms += 1;
+      },
+    });
+    await h.commands.get("mode")?.handler("review", h.ctx);
+    write("second");
+
+    const { modeDefinitionFingerprint } = await import("../src/modes.ts");
+    const { readModeFile } = await import("../src/mode-definitions.ts");
+    const { definition } = readModeFile(join(root, "modes", "review.json"));
+    const digest = modeDefinitionFingerprint({
+      ...definition,
+      scope: "global",
+      path: join(root, "modes", "review.json"),
+    }).digest;
+
+    // Without --expect the dialog is offered (and a "no" answer aborts).
+    confirms = 0;
+    await h.commands.get("mode-reapprove")?.handler("", h.ctx);
+    assert.ok(confirms > 0, "the interactive confirm must still run without --expect");
+    const beforeAbort = h.entries.length;
+
+    // With --expect covering the selection, no dialog blocks the call and it persists.
+    confirms = 0;
+    await h.commands.get("mode-reapprove")?.handler(`--expect ${digest}`, h.ctx);
+    assert.equal(confirms, 0, "--expect covering the selection must not open the confirm");
+    assert.ok(h.entries.length > beforeAbort, "--expect reapproval must persist");
+    assert.equal((h.entries.at(-1) as { data: { source: string } }).data.source, "reapprove");
+  } finally {
+    if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousDir;
+    if (previousMode === undefined) delete process.env.PI_MODE;
+    else process.env.PI_MODE = previousMode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});

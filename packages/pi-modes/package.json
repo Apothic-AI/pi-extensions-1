@@ -41,13 +41,16 @@
     "docs:list:workspace": "node ~/ai-society/core/agent-scripts/scripts/docs-list.mjs --workspace --discover",
     "docs:list:json": "node ~/ai-society/core/agent-scripts/scripts/docs-list.mjs --json",
     "mode:lint": "node ./scripts/mode-lint.mjs",
+    "mode:state": "node --experimental-strip-types ./scripts/mode-cli.ts state",
     "release:check": "bash ./scripts/release-check.sh",
     "release:check:quick": "SKIP_PI_SMOKE=1 bash ./scripts/release-check.sh",
     "release:check:ci": "RELEASE_CHECK_REQUIRE_REGISTRY=1 bash ./scripts/release-check.sh"
   },
   "files": [
+    "bin/pi-modes.mjs",
     "extensions/mode.ts",
     "src",
+    "scripts/mode-cli.ts",
     "tests",
     "docs/project/2026-07-11-prompt-mode-architecture.md",
     "docs/project/2026-07-11-implementation-plan.md",
@@ -66,6 +69,12 @@
     "prompts": [
       "./prompts"
     ]
+  },
+  "bin": {
+    "pi-modes": "./bin/pi-modes.mjs"
+  },
+  "dependencies": {
+    "jiti": "^2.7.0"
   },
   "x-pi-template": {
     "scaffoldMode": "simple-package",

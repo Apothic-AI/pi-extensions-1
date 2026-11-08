@@ -43,12 +43,22 @@ system4d:
 - Run `npm run docs:list` when task scope touches architecture/process/domain docs.
 - Use `npm run docs:list:workspace` for workspace/monorepo scans.
 - For TypeScript extension conventions, consult `engineering-core` lane `pi-ts`:
-  - `uv tool -n run --from ~/ai-society/core/engineering-core engineering-core show pi-ts`
-- The docs scripts invoke `node ~/ai-society/core/agent-scripts/scripts/docs-list.mjs` directly; do not add a package-local wrapper or alternate implementation.
+  - Use the configured engineering-core lane command `engineering-core show pi-ts`.
+- The docs scripts invoke `npm run docs:list` directly; do not add a package-local wrapper or alternate implementation.
 
 ## Validation
 
 - Run `npm run check` after structural/documentation changes.
+
+## Out-of-band mode operations
+
+- `pi-modes state|expected|attest <session.jsonl>` (`scripts/mode-cli.ts`) reads a lane's recorded
+  mode state and attests against it. It is read-only by design and never attaches to a session: a
+  second writer on a live session is forbidden. A running lane re-approves itself with
+  `/mode-reapprove --expect <digest>`; see `docs/project/2026-11-07-out-of-band-mode-reapproval.md`.
+- `--expect` digests are per-key and include the definition's `scope` and `path`, so they must be
+  computed with the package's `modeDefinitionFingerprint` for the path a lane reads — never a hash of
+  the file's bytes.
 
 ## Copier policy
 

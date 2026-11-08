@@ -38,7 +38,7 @@ Mode activation changes prompt policy only. It never grants tools, mutation, con
 | `/mode presets` | List discovered named compositions and diagnostics. |
 | `/mode-status [--json]` | Show selection, effective components, hashes, estimates, provenance, drift, and fallback. |
 | `/mode-preview [--json] [selection]` | Preview components and the composed prompt without activation. |
-| `/mode-reapprove [--confirm-exact] [--confirm-project]` | Explicitly accept changed active definitions and refresh fingerprints. |
+| `/mode-reapprove [--confirm-exact] [--confirm-project] [--expect <sha256>]` | Explicitly accept changed active definitions and refresh fingerprints. `--expect` (single sha256, or `key=sha256,...`) refuses unless the definition digest matches, which pins the attestation for a non-interactive caller. |
 | `/mode-policy <block\|warn\|allow>` | Choose what later definition drift does; `block` is the default. |
 | `/mode-new [--project] <key>` | Save a new strict mode without activating it. |
 | `/mode-edit <key>` | Edit a custom mode; active edits become blocked drift until reapproved. |
@@ -83,6 +83,56 @@ Built-in and global modes never ask. A session that already used a project mode 
 ### Headless observability
 
 `/mode-status --json` and `/mode-preview --json` emit one deterministic JSON object. Preview's `prompt` is what the current files compose, so changed or unconfirmed text can be read; its `blocked`, `driftedKeys` and `diagnostics` say what the model gets now. Status includes only metadata and hashes. Both report `composition.hiddenCharacters`, the characters a terminal would not show, and print only printable ASCII: everything else is `\u` escaped, so the output is safe in a terminal and parses back to the exact text. Non-TUI status/preview use JSON automatically. Pi currently redirects extension `console` output to process stderr and does not correlate it as an RPC result event, so automation must capture stderr together with `extension_error`; the JSON line is machine-parseable, but its channel is a host limitation.
+
+### Out-of-band state and attestation (`pi-modes` CLI)
+
+`pi-modes state|expected|attest <session.jsonl>` reads a lane's recorded mode state from a session file and attestations against it, **without writing to the session and without attaching to it**. The `pi-modes` bin is `bin/pi-modes.mjs`, a shim that loads the TypeScript CLI through jiti (Node refuses type-stripping under `node_modules`, so an installed package cannot run its `.ts` sources directly). In this repo you can also run `node --experimental-strip-types scripts/mode-cli.ts` directly. This is the non-interactive half of propagating a mode change: a launcher lane reads its own materialised `modes/` copy, and after `/profile reload` refreshes it the lane still needs `/mode-reapprove` to accept the new digest, or it composes the native prompt under the default `block` policy.
+
+```bash
+# What did the lane record, and is that definition still current?
+pi-modes state ~/.pi/agent/sessions/--…--/session.jsonl
+
+# The digest the lane would record after /profile reload (fingerprinted at ITS path).
+pi-modes expected <session.jsonl>              # prints a sha256 for a single-mode selection
+
+# Have the lane re-approve ITSELF, then confirm it did:
+#   send over herdr:  /mode-reapprove --confirm-project --expect <that digest>
+pi-modes attest <session.jsonl> --expect <sha256>
+```
+
+Exit codes: `state` 0 match / 3 drift / 4 unknown / 1 no state; `attest` 0 attested / 2 mismatch / 1 no state.
+
+`state` reports **UNKNOWN** when the recorded definition path is gone — usually a launch instance that was swept on exit. UNKNOWN is *not verified*: it is neither a pass nor a failure, and it has its own exit code (4) and a `verdict` field in `--json`, so a script cannot read it as healthy.
+
+With `--json`, `recorded` is a **boolean** ("a v3 entry exists"), not a digest. The digest is at `keys[].recordedDigest` (with `recordedPath`, `recordedScope`, `currentDigest`, per-key `verdict`), and for a single-key selection also at the top level as `recordedDigest`/`currentDigest` with a top-level `verdict`. Read `verdict` (`match` / `drift` / `unknown`) rather than `recorded`.
+
+The digest covers the definition's `scope` and `path`, so the **same text at an instance copy hashes differently from the real agent dir**. Always compute `--expect` with `expected` (the package's own `modeDefinitionFingerprint` over the path the lane reads), never as a hash of the file's bytes.
+
+A running lane must re-approve **itself** — the command arrives as input and the lane's own session records the new digest, so the consent gate stays real. Writing a session from outside makes two writers on one session, which the fleet forbids: attaching a second `pi --mode rpc --session <file>` resumes the session, appends its own entries, and re-records mode state from its environment rather than from the command sent to it. `pi-modes` therefore only reads.
+
+#### Restricted mode: ARMED BY DEFAULT (friction, not a boundary)
+
+The CLI refuses to run unless a valid secret file is present. It needs **no environment to be armed** — absence of any variable means armed, so the gate applies by simply existing:
+
+```bash
+# Bare invocation, nothing set: refused, exit 6.
+pi-modes state <session.jsonl>
+
+# Authorized: point at an approved leader's secret file.
+PI_MODES_CLI_SECRET_FILE=~/.overlord/pi-modes-cli.secret pi-modes state <session.jsonl>
+```
+
+Why armed by default rather than opt-in: `pil` parses `.pi/launch.env` against a fixed whitelist (only `PI_MODE`, `PI_PROFILE`, `PI_MODE_CONFIRM_PROJECT`) and applies it only to leader names, and a running `herdr` server freezes the environment its panes inherit — so a variable that must be *set* to arm cannot gate a running fleet without restarting lanes. Arming on absence needs neither.
+
+The secret is read from `$PI_MODES_CLI_SECRET_FILE` (default `~/.pi/agent/secrets/pi-modes-cli`, which is deliberately **not** populated — a copy at the documented path would let any lane that reads the refusal message find it in one step and zero the friction). Mode `600`; a group/world-readable file is refused rather than accepted. If `PI_MODES_CLI_SECRET` is also set it must match that file. A refused call exits **6** and prints what to do next, including who to ask. `PI_MODES_CLI_SECRET_REQUIRED` is retired and ignored.
+
+**What this is and is not.** It is a **speed bump**: it makes a caller stop and fetch a secret from an approved leader deliberately. It is **not** a security boundary, and should not be described as one:
+
+- Every lane on this machine runs as the same uid with no namespace separation, so a `600` secret is readable by any lane that knows the path, and a lane could point the CLI at a file it made itself. Trying is the point — the friction is that the agent has to decide to do it.
+- The gate covers **this CLI only**. It does not cover re-approving a mode from inside a lane: `/mode-reapprove` is ungated, and in RPC mode it runs with no confirmation dialog at all. That path is left open deliberately, as a watch item.
+- The CLI itself has no write path — it cannot re-approve anything — so the secret guards the safe surface, not the dangerous one. It exists because the convenient surface is where drift happens.
+
+`PI_MODES_CLI_AUTH_DISABLED=1` is the one deliberate disarm, for a demonstration or a lane that must run ungated.
 
 ## Launch-time selection
 

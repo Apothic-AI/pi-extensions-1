@@ -3,6 +3,7 @@ import test from "node:test";
 import { createModeState, parseModeDefinition, type ResolvedMode } from "../src/modes.ts";
 import {
   parseDirectSelection,
+  parseReapproveFlags,
   requiresReplaceFinalConfirmation,
   selectionDefinitionFingerprint,
 } from "../src/selection-commands.ts";
@@ -167,4 +168,50 @@ test("definition fingerprint detects prompt, strategy, scope, and provenance dri
       : candidate,
   );
   assert.notEqual(selectionDefinitionFingerprint(selection, moved), baseline);
+});
+
+// --expect: the out-of-band attestation FT-40 asks for. The parser must accept exactly one
+// lowercase sha256, reject a malformed or repeated value, and keep the interactive defaults.
+const DIGEST = "a".repeat(64);
+
+test("reapprove accepts --expect with a sha256 and passes it through", () => {
+  const flags = parseReapproveFlags(["--confirm-project", "--expect", DIGEST]);
+  assert.equal(flags.error, undefined);
+  assert.equal(flags.project, true);
+  assert.equal(flags.exact, false);
+  assert.equal(flags.expectedDefinitionDigests.get(""), DIGEST);
+  assert.deepEqual(flags.rest, []);
+});
+
+test("reapprove accepts a keyed --expect for a multi-mode selection", () => {
+  const flags = parseReapproveFlags(["--expect", `leader=${DIGEST},writer=${DIGEST}`]);
+  assert.equal(flags.error, undefined);
+  assert.equal(flags.expectedDefinitionDigests.get("leader"), DIGEST);
+  assert.equal(flags.expectedDefinitionDigests.get("writer"), DIGEST);
+});
+
+test("reapprove without --expect is unchanged for interactive use", () => {
+  const flags = parseReapproveFlags(["--confirm-exact"]);
+  assert.equal(flags.error, undefined);
+  assert.equal(flags.exact, true);
+  assert.equal(flags.expectedDefinitionDigests.size, 0);
+});
+
+test("reapprove rejects a malformed, missing, or repeated --expect", () => {
+  assert.match(parseReapproveFlags(["--expect", "not-a-digest"]).error ?? "", /sha256/);
+  assert.match(parseReapproveFlags(["--expect"]).error ?? "", /requires a sha256/);
+  assert.match(
+    parseReapproveFlags(["--expect", DIGEST, "--expect", DIGEST]).error ?? "",
+    /only once/,
+  );
+  assert.match(
+    parseReapproveFlags(["--expect", `bad key=${DIGEST}`]).error ?? "",
+    /canonical mode key/,
+  );
+  assert.match(parseReapproveFlags(["--expect", "leader=nope"]).error ?? "", /sha256/);
+  // Uppercase is normalised rather than rejected, so a caller's shell casing does not matter.
+  assert.equal(
+    parseReapproveFlags(["--expect", DIGEST.toUpperCase()]).expectedDefinitionDigests.get(""),
+    DIGEST,
+  );
 });

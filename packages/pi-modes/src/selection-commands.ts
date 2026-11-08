@@ -3,6 +3,7 @@ import {
   type DefinitionFingerprints,
   EMPTY_MODE_SELECTION,
   formatDiagnostics,
+  isValidModeKey,
   type ModeSelection,
   modeDefinitionFingerprint,
   normalizeModeSelection,
@@ -59,6 +60,119 @@ function validateCandidate(
 }
 
 const ACTIVATION_FLAGS = ["--confirm-exact", "--confirm-project"] as const;
+
+const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
+
+export interface ReapproveFlags {
+  exact: boolean;
+  project: boolean;
+  /**
+   * Per-key definition digests the caller attested to (`key=sha256`, or a bare sha256 for a
+   * single-key selection). Verified against `modeDefinitionFingerprint` for the definition at the
+   * lane's recorded path before anything is persisted; a mismatch refuses. This is the FT-40
+   * attestation: the caller pins the exact definition it looked at, so the guard does its job
+   * instead of relying on the caller's timing.
+   */
+  expectedDefinitionDigests: ReadonlyMap<string, string>;
+  rest: string[];
+  error?: string;
+}
+
+/**
+ * Parses `/mode-reapprove` arguments. Accepts `--expect <sha256>` (one key) or
+ * `--expect <key=sha256,...>`, the out-of-band attestation FT-40 asks for. Without `--expect` the
+ * behaviour is unchanged, so the interactive consent path is not weakened.
+ */
+export function parseReapproveFlags(tokens: readonly string[]): ReapproveFlags {
+  const flags = parseActivationFlags(tokens);
+  const empty: ReadonlyMap<string, string> = new Map();
+  if (flags.error) {
+    return {
+      exact: false,
+      project: false,
+      expectedDefinitionDigests: empty,
+      rest: [],
+      error: flags.error,
+    };
+  }
+  const rest: string[] = [];
+  let raw: string | undefined;
+  for (let index = 0; index < flags.rest.length; index += 1) {
+    const token = flags.rest[index] ?? "";
+    if (token.toLowerCase() !== "--expect") {
+      rest.push(token);
+      continue;
+    }
+    if (raw !== undefined) {
+      return {
+        exact: false,
+        project: false,
+        expectedDefinitionDigests: empty,
+        rest: [],
+        error: "--expect may appear only once",
+      };
+    }
+    const value = flags.rest[index + 1];
+    if (value === undefined) {
+      return {
+        exact: false,
+        project: false,
+        expectedDefinitionDigests: empty,
+        rest: [],
+        error: "--expect requires a sha256 digest",
+      };
+    }
+    raw = value;
+    index += 1;
+  }
+  if (raw === undefined) {
+    return { exact: flags.exact, project: flags.project, expectedDefinitionDigests: empty, rest };
+  }
+  const digests = new Map<string, string>();
+  if (!raw.includes("=")) {
+    // A bare digest: for a single-key selection the handler resolves the key.
+    const digest = raw.toLowerCase();
+    if (!DIGEST_PATTERN.test(digest)) {
+      return {
+        exact: false,
+        project: false,
+        expectedDefinitionDigests: empty,
+        rest: [],
+        error: "--expect requires a lowercase sha256 hex digest",
+      };
+    }
+    digests.set("", digest);
+    return { exact: flags.exact, project: flags.project, expectedDefinitionDigests: digests, rest };
+  }
+  for (const pair of raw.split(",")) {
+    const separator = pair.indexOf("=");
+    const key = pair.slice(0, separator).trim();
+    const digest = pair
+      .slice(separator + 1)
+      .trim()
+      .toLowerCase();
+    if (!key || !isValidModeKey(key)) {
+      return {
+        exact: false,
+        project: false,
+        expectedDefinitionDigests: empty,
+        rest: [],
+        error: `--expect key is not a canonical mode key: ${key || pair}`,
+      };
+    }
+    if (!DIGEST_PATTERN.test(digest)) {
+      return {
+        exact: false,
+        project: false,
+        expectedDefinitionDigests: empty,
+        rest: [],
+        error: `--expect value for ${key} is not a lowercase sha256 hex digest`,
+      };
+    }
+    digests.set(key, digest);
+  }
+  return { exact: flags.exact, project: flags.project, expectedDefinitionDigests: digests, rest };
+}
 
 /**
  * Separates the headless acknowledgements from the other tokens: case-insensitive, each at most

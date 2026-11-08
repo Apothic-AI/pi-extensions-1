@@ -21,6 +21,7 @@ import {
   type LoadedModes,
   type ModeSelection,
   type ModeStateV3,
+  modeDefinitionFingerprint,
   modeSelectionsEqual,
   resolutionPolicy,
   resolveModeSelection,
@@ -29,8 +30,8 @@ import {
 import { unconfirmedProjectModes } from "./project-mode-approvals.ts";
 import {
   modeArgumentCompletions,
-  parseActivationFlags,
   parseDirectSelection,
+  parseReapproveFlags,
   requiresReplaceFinalConfirmation,
   selectionDefinitionFingerprint,
   selectionLabel,
@@ -243,9 +244,11 @@ export function registerModeCommands(pi: ExtensionAPI, services: ModeCommandServ
         .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       try {
-        const flags = parseActivationFlags(args.trim().split(/\s+/).filter(Boolean));
+        const flags = parseReapproveFlags(args.trim().split(/\s+/).filter(Boolean));
         if (flags.error || flags.rest.length > 0) {
-          throw new Error("Usage: /mode-reapprove [--confirm-exact] [--confirm-project]");
+          throw new Error(
+            "Usage: /mode-reapprove [--confirm-exact] [--confirm-project] [--expect <sha256> | --expect <key=sha256,...>]",
+          );
         }
         const loaded = services.currentModes(ctx);
         const replayed = services.replay(ctx, loaded.modes);
@@ -266,6 +269,31 @@ export function registerModeCommands(pi: ExtensionAPI, services: ModeCommandServ
           replayed.selection,
           loaded.modes,
         );
+        // A caller-supplied attestation (FT-40) pins the exact definition(s) the caller looked at.
+        // Verify before any question is asked or anything is persisted, so a stale digest refuses
+        // loudly instead of blessing text that moved under the caller. The gate on persistSelection
+        // still recomputes the composition fingerprint at append time.
+        if (flags.expectedDefinitionDigests.size > 0) {
+          const selected = selectedKeys(replayed.selection);
+          const bare = flags.expectedDefinitionDigests.get("");
+          if (bare !== undefined && selected.length !== 1) {
+            throw new Error(
+              "--expect needs one key=sha256 per selected mode when the selection has more than one mode",
+            );
+          }
+          for (const key of selected) {
+            const mode = loaded.modes.find((candidate) => candidate.key === key);
+            const expected = bare ?? flags.expectedDefinitionDigests.get(key);
+            if (expected === undefined) {
+              throw new Error(`--expect is missing a digest for ${key}`);
+            }
+            if (!mode || modeDefinitionFingerprint(mode).digest !== expected) {
+              throw new Error(
+                "Mode definitions changed after confirmation; preview and confirm the selection again",
+              );
+            }
+          }
+        }
         // Reapproval is where an active project mode whose file changed gets confirmed; with
         // --confirm-project it also makes a startup acknowledgement permanent.
         const unconfirmed = unconfirmedProjectModes(
@@ -298,8 +326,22 @@ export function registerModeCommands(pi: ExtensionAPI, services: ModeCommandServ
         )
           return;
         // Any other change the dialogs above did not show still needs its own confirmation.
+        // A caller that supplied --expect for EVERY selected mode has already attested the exact
+        // definition(s), which is stronger evidence than this generic prompt: pressing Enter on a
+        // dialog that says "preview first if that was unexpected" adds no information the caller
+        // did not already supply. Skipping it there is what lets a non-interactive caller finish
+        // (a TUI dialog blocks a headless caller forever, and polling for it is a race). Without
+        // --expect the dialog is unchanged, so interactive consent is not weakened.
+        const attestedFully =
+          flags.expectedDefinitionDigests.size > 0 &&
+          selectedKeys(replayed.selection).every(
+            (key) =>
+              flags.expectedDefinitionDigests.get("") !== undefined ||
+              flags.expectedDefinitionDigests.get(key) !== undefined,
+          );
         if (
           ctx.mode === "tui" &&
+          !attestedFully &&
           (unshownDrift.length > 0 || shown.size === 0) &&
           !(await ctx.ui.confirm(
             "Reapprove active prompt mode definitions?",
